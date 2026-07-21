@@ -43,11 +43,16 @@ jobs:
           npx cap add android
           npx cap sync
 
+      - name: Show active Java version
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+
       - name: Build APK
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
+          ./gradlew assembleDebug --stacktrace -Dorg.gradle.java.home="$JAVA_HOME"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
