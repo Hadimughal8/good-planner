@@ -590,8 +590,9 @@
       <div class="settings-card">
         <div class="settings-label">Reminder notifications</div>
         <div class="settings-desc" style="margin-top:0;">Allow browser notifications so reminders can nudge you even when the tab is in the background.</div>
-        <div class="save-row" style="justify-content:flex-start; margin-top:12px;">
+        <div class="save-row" style="justify-content:flex-start; margin-top:12px; gap:10px;">
           <button class="btn btn-ghost" id="enableNotif">Enable notifications</button>
+          <button class="btn btn-ghost" id="testAlarm">Test alarm</button>
         </div>
       </div>
 
@@ -1082,25 +1083,43 @@
   });
 
   // ---------- reminder alarm engine ----------
+  // A single persistent AudioContext, unlocked on the user's first tap.
+  // WebViews/browsers silently block audio started without a prior user
+  // gesture, so we "warm up" the context early and just resume it later.
+  let sharedAudioCtx = null;
+  function unlockAudio(){
+    if(!sharedAudioCtx){
+      try{ sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }catch(e){ return; }
+    }
+    if(sharedAudioCtx.state === 'suspended'){ sharedAudioCtx.resume().catch(()=>{}); }
+  }
+  document.addEventListener('click', unlockAudio, {once:false});
+  document.addEventListener('touchstart', unlockAudio, {once:false});
+
   // Plays a short alarm-style beep using Web Audio API (no external file needed)
   function playAlarmSound(){
     try{
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const beepAt = (start, freq)=>{
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        gain.gain.setValueAtTime(0.0001, start);
-        gain.gain.exponentialRampToValueAtTime(0.35, start+0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, start+0.28);
-        osc.connect(gain); gain.connect(ctx.destination);
-        osc.start(start); osc.stop(start+0.3);
+      if(!sharedAudioCtx){ sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      const ctx = sharedAudioCtx;
+      const startBeeps = ()=>{
+        const beepAt = (start, freq)=>{
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.0001, start);
+          gain.gain.exponentialRampToValueAtTime(0.35, start+0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, start+0.28);
+          osc.connect(gain); gain.connect(ctx.destination);
+          osc.start(start); osc.stop(start+0.3);
+        };
+        const now = ctx.currentTime;
+        beepAt(now, 880);
+        beepAt(now+0.35, 880);
+        beepAt(now+0.7, 1046);
       };
-      const now = ctx.currentTime;
-      beepAt(now, 880);
-      beepAt(now+0.35, 880);
-      beepAt(now+0.7, 1046);
+      if(ctx.state === 'suspended'){ ctx.resume().then(startBeeps).catch(()=>{}); }
+      else{ startBeeps(); }
     }catch(e){ /* audio not available */ }
   }
 
