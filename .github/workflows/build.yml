@@ -35,7 +35,7 @@ jobs:
       - name: Init project
         run: |
           npm init -y
-          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/local-notifications
           npx cap init "Good Planner" "com.yourname.goodplanner" --web-dir=www
 
       - name: Add Android platform
@@ -52,6 +52,18 @@ jobs:
               exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
           }
           EOF
+
+      - name: Add exact-alarm & notification permissions
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i '/<\/manifest>/i\
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />\
+              <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />\
+              <uses-permission android:name="android.permission.VIBRATE" />\
+              <uses-permission android:name="android.permission.WAKE_LOCK" />' "$MANIFEST"
+          cat "$MANIFEST"
 
       - name: Show active Java version
         run: |
