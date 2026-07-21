@@ -329,7 +329,7 @@
 
   /* ---------- FAB ---------- */
   .fab{
-    position:fixed; left:50%; transform:translateX(-50%); bottom:52px; z-index:30;
+    position:fixed; right:calc(50% - 240px + 20px); bottom:96px; z-index:30;
     width:58px; height:58px; border-radius:var(--radius-full);
     background:linear-gradient(135deg, var(--accent-peach), var(--accent-peach-deep));
     display:flex; align-items:center; justify-content:center;
@@ -337,8 +337,9 @@
     cursor:pointer; color:var(--accent-blue-deep); border:none;
   }
   body.theme-old .fab{ background:linear-gradient(135deg, var(--accent-peach), var(--accent-blue)); color:#3a2a20; box-shadow:0 12px 26px rgba(180,130,95,0.35), var(--shadow-soft); }
-  .fab:active{transform:translateX(-50%) scale(.93);}
+  .fab:active{transform:scale(.93);}
   .fab svg{width:24px;height:24px;}
+  @media (max-width:520px){ .fab{right:20px;} }
 
   /* ---------- Bottom nav ---------- */
   nav.bottom{
@@ -589,7 +590,7 @@
 
       <div class="settings-card">
         <div class="settings-label">Reminder notifications</div>
-        <div class="settings-desc" style="margin-top:0;">Allow browser notifications so reminders can nudge you even when the tab is in the background.</div>
+        <div class="settings-desc" style="margin-top:0;">Allow notifications so reminders can alert you. In the installed app, reminders ring at their set time even if the app is closed or your phone is locked.</div>
         <div class="save-row" style="justify-content:flex-start; margin-top:12px; gap:10px;">
           <button class="btn btn-ghost" id="enableNotif">Enable notifications</button>
           <button class="btn btn-ghost" id="testAlarm">Test alarm</button>
@@ -605,7 +606,7 @@
       </div>
 
       <div class="settings-card" style="text-align:center; box-shadow:none; background:transparent; border:none;">
-        <div style="font-size:11px; color:var(--text-low); letter-spacing:.5px;">Good Planner · v1.1</div>
+        <div style="font-size:11px; color:var(--text-low); letter-spacing:.5px;">Good Planner · v1.3</div>
       </div>
     </section>
   </main>
@@ -722,6 +723,102 @@
   }
   function isSameDay(a,b){ return fmtKey(a)===fmtKey(b); }
   function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
+
+  // ---------- Native alarm engine (Capacitor / Android) ----------
+  // When this app is running inside the Capacitor-wrapped Android app (built via
+  // the GitHub Action), window.Capacitor.isNativePlatform() is true and the
+  // LocalNotifications plugin is available. Notifications scheduled through it
+  // are handed off to Android's own AlarmManager, so they fire at the exact
+  // time even if this app is fully closed or the screen is locked — because
+  // Android itself wakes the app briefly to deliver them, independent of any
+  // JavaScript timer running in a page. When just viewed in a regular mobile
+  // browser (not the built APK), Native stays null and the app falls back to
+  // the in-page reminder engine further below (only works while the tab/app
+  // is open).
+  const Native = (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications)
+    ? window.Capacitor.Plugins.LocalNotifications
+    : null;
+
+  function hashId(str){
+    let h = 0;
+    for(let i=0;i<str.length;i++){ h = (h*31 + str.charCodeAt(i)) | 0; }
+    return Math.abs(h) % 2147483647;
+  }
+
+  function buildDateTime(dateObj, timeStr){
+    const [h,m] = timeStr.split(':').map(Number);
+    const d = new Date(dateObj);
+    d.setHours(h, m, 0, 0);
+    return d;
+  }
+
+  async function ensureNotifChannel(){
+    if(!Native) return;
+    try{
+      await Native.requestPermissions();
+      await Native.createChannel({
+        id: 'reminders',
+        name: 'Reminders',
+        description: 'Good Planner reminder alarms',
+        importance: 5,
+        visibility: 1,
+        vibration: true
+      });
+    }catch(e){ /* ignore, e.g. iOS has no channels */ }
+  }
+
+  async function scheduleNativeReminder(item, dateObj){
+    if(!Native || item.type!=='reminder' || !item.time) return;
+    if(dateObj.getTime() <= Date.now()) return; // don't schedule for the past
+    try{
+      await Native.schedule({
+        notifications: [{
+          id: hashId(item.id),
+          title: item.title || 'Reminder',
+          body: item.desc || 'Your reminder time has arrived',
+          schedule: { at: dateObj, allowWhileIdle: true },
+          channelId: 'reminders',
+          autoCancel: true
+        }]
+      });
+    }catch(e){ console.error('native schedule failed', e); }
+  }
+
+  async function cancelNativeReminder(itemId){
+    if(!Native) return;
+    try{ await Native.cancel({ notifications:[{ id: hashId(itemId) }] }); }catch(e){}
+  }
+
+  async function cancelAllNativeReminders(){
+    if(!Native) return;
+    try{
+      const pending = await Native.getPending();
+      if(pending && pending.notifications && pending.notifications.length){
+        await Native.cancel({ notifications: pending.notifications.map(n=>({id:n.id})) });
+      }
+    }catch(e){}
+  }
+
+  // On startup, re-schedule any not-yet-fired future reminders. This matters
+  // after the app is reinstalled/updated, or the very first run, since past
+  // AlarmManager schedules don't survive an app data wipe.
+  async function resyncNativeReminders(){
+    if(!Native) return;
+    const keys = storListPrefix('day:');
+    const todayStr = fmtKey(new Date());
+    for(const k of keys){
+      const dateStr = k.slice(4); // strip 'day:' prefix
+      if(dateStr < todayStr) continue;
+      const day = storGet(k);
+      if(!day || !day.tasks) continue;
+      day.tasks.forEach(item=>{
+        if(item.type==='reminder' && item.time && !item.done){
+          const d = buildDateTime(new Date(dateStr+'T00:00:00'), item.time);
+          scheduleNativeReminder(item, d);
+        }
+      });
+    }
+  }
 
   // ---------- storage helpers (localStorage based, works fully offline in an APK) ----------
   const STORAGE_PREFIX = 'goodplanner:';
@@ -851,12 +948,13 @@
       const t = day.tasks.find(x=>x.id===id);
       if(t){ t.done = !t.done; saveDay(fmtKey(currentDate)); renderToday(); }
     }));
-    $$('.del-btn').forEach(c=>c.addEventListener('click', (e)=>{
+    $$('.del-btn').forEach(c=>c.addEventListener('click', async (e)=>{
       e.stopPropagation();
       const id = e.currentTarget.getAttribute('data-id');
       const day = loadDay(fmtKey(currentDate));
       day.tasks = day.tasks.filter(x=>x.id!==id);
       saveDay(fmtKey(currentDate));
+      await cancelNativeReminder(id);
       renderToday();
       showToast('Removed');
     }));
@@ -957,7 +1055,7 @@
   }
 
   $('#cancelAdd').addEventListener('click', ()=>closeOverlay('#addOverlay'));
-  $('#confirmAdd').addEventListener('click', ()=>{
+  $('#confirmAdd').addEventListener('click', async ()=>{
     const title = $('#itemTitle').value.trim();
     if(!title){ $('#itemTitle').focus(); return; }
     const time = $('#itemTime').value;
@@ -968,23 +1066,32 @@
       const t = day.tasks.find(x=>x.id===editingItemId);
       if(t){ if(t.time!==time) t.alerted=false; t.title=title; t.time=time; t.desc=desc; t.type=pendingType; }
       saveDay(key);
+      await cancelNativeReminder(editingItemId);
+      if(t && pendingType==='reminder' && time){
+        await scheduleNativeReminder(t, buildDateTime(currentDate, time));
+      }
       closeOverlay('#addOverlay');
       renderToday();
       showToast('Saved');
     } else {
-      day.tasks.push({id:uid(), title, time, desc, type:pendingType, done:false, alerted:false});
+      const newItem = {id:uid(), title, time, desc, type:pendingType, done:false, alerted:false};
+      day.tasks.push(newItem);
       saveDay(key);
+      if(pendingType==='reminder' && time){
+        await scheduleNativeReminder(newItem, buildDateTime(currentDate, time));
+      }
       closeOverlay('#addOverlay');
       renderToday();
       showToast(pendingType==='reminder' ? 'Reminder added' : 'Task added');
     }
   });
-  $('#deleteItem').addEventListener('click', ()=>{
+  $('#deleteItem').addEventListener('click', async ()=>{
     if(!editingItemId) return;
     const key = fmtKey(currentDate);
     const day = loadDay(key);
     day.tasks = day.tasks.filter(x=>x.id!==editingItemId);
     saveDay(key);
+    await cancelNativeReminder(editingItemId);
     closeOverlay('#addOverlay');
     renderToday();
     showToast('Removed');
@@ -1062,13 +1169,27 @@
     showToast('Email saved');
   });
   $('#enableNotif').addEventListener('click', async ()=>{
+    if(Native){
+      await ensureNotifChannel();
+      showToast('Notifications enabled for reminders');
+      return;
+    }
     if(!('Notification' in window)){ showToast('Not supported on this browser'); return; }
     const perm = await Notification.requestPermission();
     showToast(perm==='granted' ? 'Notifications enabled' : 'Permission not granted');
   });
+  $('#testAlarm').addEventListener('click', async ()=>{
+    if(Native){
+      await ensureNotifChannel();
+      await scheduleNativeReminder({id:'test-alarm', type:'reminder', time:'00:00', title:'Test alarm', desc:'Lock your phone now — this should still ring in 5 seconds'}, new Date(Date.now()+5000));
+      showToast('Test alarm in 5 seconds — try locking your phone');
+    } else {
+      fireReminderAlert({title:'Test alarm', desc:'This is what your reminder sounds like'});
+    }
+  });
   $('#clearData').addEventListener('click', ()=>openOverlay('#confirmOverlay'));
   $('#cancelClear').addEventListener('click', ()=>closeOverlay('#confirmOverlay'));
-  $('#confirmClear').addEventListener('click', ()=>{
+  $('#confirmClear').addEventListener('click', async ()=>{
     const dayKeys = storListPrefix('day:');
     for(const k of dayKeys){ storDelete(k); }
     storDelete('notes');
@@ -1077,6 +1198,7 @@
     dayCache = {}; notesCache = [];
     $('#emailInput').value='';
     applyTheme(false);
+    await cancelAllNativeReminders();
     closeOverlay('#confirmOverlay');
     renderToday(); renderNotes();
     showToast('All data cleared');
@@ -1096,7 +1218,8 @@
   document.addEventListener('click', unlockAudio, {once:false});
   document.addEventListener('touchstart', unlockAudio, {once:false});
 
-  // Plays a short alarm-style beep using Web Audio API (no external file needed)
+  // Plays a short alarm-style beep sequence using Web Audio API (no external file needed).
+  // Loops a few rounds so it's noticeable even if the phone is on silent-but-media, low volume, etc.
   function playAlarmSound(){
     try{
       if(!sharedAudioCtx){ sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
@@ -1108,15 +1231,18 @@
           osc.type = 'sine';
           osc.frequency.value = freq;
           gain.gain.setValueAtTime(0.0001, start);
-          gain.gain.exponentialRampToValueAtTime(0.35, start+0.02);
+          gain.gain.exponentialRampToValueAtTime(0.4, start+0.02);
           gain.gain.exponentialRampToValueAtTime(0.0001, start+0.28);
           osc.connect(gain); gain.connect(ctx.destination);
           osc.start(start); osc.stop(start+0.3);
         };
         const now = ctx.currentTime;
-        beepAt(now, 880);
-        beepAt(now+0.35, 880);
-        beepAt(now+0.7, 1046);
+        // three rounds of a two-tone chime, spaced out, so it reads as an alarm not a notification blip
+        for(let round=0; round<3; round++){
+          const base = now + round*1.1;
+          beepAt(base, 880);
+          beepAt(base+0.35, 1046);
+        }
       };
       if(ctx.state === 'suspended'){ ctx.resume().then(startBeeps).catch(()=>{}); }
       else{ startBeeps(); }
@@ -1125,18 +1251,23 @@
 
   function fireReminderAlert(item){
     playAlarmSound();
-    if(navigator.vibrate){ navigator.vibrate([250,120,250,120,250]); }
-    showToast('⏰ Reminder: '+item.title);
+    if(navigator.vibrate){ navigator.vibrate([300,150,300,150,300,150,300]); }
+    showToast('⏰ Reminder: '+(item.title||''));
     if('Notification' in window && Notification.permission==='granted'){
       try{
         new Notification(item.title || 'Reminder', {
           body: item.desc || 'Your reminder time has arrived',
-          tag: 'goodplanner-'+item.id
+          tag: 'goodplanner-'+(item.id||uid()),
+          requireInteraction: true
         });
       }catch(e){}
     }
   }
 
+  // Checks today's reminders against the current time and fires any that are due.
+  // Uses a generous catch-up window so that even if the browser tab was backgrounded
+  // and JS timers got throttled by the OS, a reminder that was "due" a little while ago
+  // still fires the moment the check runs again (e.g. when the screen/app is reopened).
   function checkReminders(){
     const now = new Date();
     const todayKey = fmtKey(now);
@@ -1148,8 +1279,9 @@
       if(item.type!=='reminder' || !item.time || item.alerted) return;
       const [h,m] = item.time.split(':').map(Number);
       const itemMinutes = h*60+m;
-      // Fire once the reminder time has arrived (allow a small catch-up window)
-      if(nowMinutes >= itemMinutes && nowMinutes <= itemMinutes+5){
+      // Fires once due, and stays "catchable" for 30 minutes in case the tab was
+      // backgrounded/throttled by the OS and this check runs late.
+      if(nowMinutes >= itemMinutes && nowMinutes <= itemMinutes+30){
         item.alerted = true;
         changed = true;
         fireReminderAlert(item);
@@ -1162,16 +1294,45 @@
     }
   }
 
+  // Try to keep the screen awake while the app is open and in the foreground,
+  // so a reminder due while you're using your phone elsewhere still has the
+  // best chance of sounding. This only helps while the app tab is open —
+  // it cannot wake a locked phone or a fully closed app (no web page can).
+  let wakeLock = null;
+  async function requestWakeLock(){
+    try{
+      if('wakeLock' in navigator && document.visibilityState==='visible'){
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    }catch(e){ /* not supported / not permitted, ignore silently */ }
+  }
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState==='visible'){
+      requestWakeLock();
+      checkReminders(); // catch up immediately on returning to the app
+    }
+  });
+
   // ---------- init ----------
-  function init(){
+  async function init(){
     loadDay(fmtKey(currentDate));
     loadNotes();
     initTheme();
     initSettings();
     renderToday();
     renderNotes();
-    checkReminders();
-    setInterval(checkReminders, 20000);
+    if(Native){
+      // Real app build: Android's AlarmManager delivers reminders even if this
+      // app is closed or the screen is locked, so the in-page JS timer below
+      // isn't needed and is skipped to avoid duplicate alerts.
+      await ensureNotifChannel();
+      await resyncNativeReminders();
+    } else {
+      // Plain browser / preview: best-effort, only fires while this tab is open.
+      checkReminders();
+      setInterval(checkReminders, 15000);
+      requestWakeLock();
+    }
     setTimeout(()=>{
       $('#splash').classList.add('hide');
       $('#app').classList.add('show');
