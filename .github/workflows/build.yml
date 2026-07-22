@@ -78,7 +78,7 @@ jobs:
       - name: Copy native alarm sources into the Android project
         run: |
           mkdir -p android/app/src/main/java/com/yourname/goodplanner/alarm
-          cp native-alarm/alarm/*.kt android/app/src/main/java/com/yourname/goodplanner/alarm/
+          cp native-alarm/alarm/*.java android/app/src/main/java/com/yourname/goodplanner/alarm/
           mkdir -p android/app/src/main/res/layout
           cp native-alarm/res/layout/activity_alarm.xml android/app/src/main/res/layout/
 
