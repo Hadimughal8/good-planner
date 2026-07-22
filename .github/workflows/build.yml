@@ -36,7 +36,13 @@ jobs:
         run: |
           npm init -y
           npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/local-notifications @capacitor/assets
-          npx cap init "Good Planner" "com.yourname.goodplanner" --web-dir=www
+          cat > capacitor.config.json << 'EOF'
+          {
+            "appId": "com.yourname.goodplanner",
+            "appName": "Good Planner",
+            "webDir": "www"
+          }
+          EOF
 
       - name: Add Android platform
         run: |
