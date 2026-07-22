@@ -63,7 +63,41 @@ jobs:
               <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />\
               <uses-permission android:name="android.permission.VIBRATE" />\
               <uses-permission android:name="android.permission.WAKE_LOCK" />' "$MANIFEST"
+
+      - name: Copy native alarm sources into the Android project
+        run: |
+          mkdir -p android/app/src/main/java/com/yourname/goodplanner/alarm
+          cp native-alarm/alarm/*.kt android/app/src/main/java/com/yourname/goodplanner/alarm/
+          mkdir -p android/app/src/main/res/layout
+          cp native-alarm/res/layout/activity_alarm.xml android/app/src/main/res/layout/
+
+      - name: Register alarm receiver/service/activity in manifest
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i '/<\/application>/i\
+              <receiver android:name=".alarm.AlarmReceiver" android:exported="false" />\
+              <service android:name=".alarm.AlarmForegroundService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\
+              <activity android:name=".alarm.AlarmActivity" android:exported="false" android:launchMode="singleTask" android:theme="@style/Theme.AppCompat.NoActionBar" />' "$MANIFEST"
           cat "$MANIFEST"
+
+      - name: Register AlarmScheduler plugin in MainActivity
+        run: |
+          cat > android/app/src/main/java/com/yourname/goodplanner/MainActivity.java << 'EOF'
+          package com.yourname.goodplanner;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+          import com.yourname.goodplanner.alarm.AlarmSchedulerPlugin;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  registerPlugin(AlarmSchedulerPlugin.class);
+                  super.onCreate(savedInstanceState);
+              }
+          }
+          EOF
+          cat android/app/src/main/java/com/yourname/goodplanner/MainActivity.java
 
       - name: Show active Java version
         run: |
