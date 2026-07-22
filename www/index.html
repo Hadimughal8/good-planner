@@ -1186,6 +1186,14 @@
   $('#enableNotif').addEventListener('click', async ()=>{
     if(Native){
       await ensureNotifChannel();
+      try{
+        const check = await Native.canScheduleExact();
+        if(check && check.value === false){
+          showToast('Opening alarm permission settings...');
+          await Native.openExactAlarmSettings();
+          return;
+        }
+      }catch(e){}
       showToast('Notifications enabled for reminders');
       return;
     }
