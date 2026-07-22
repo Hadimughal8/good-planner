@@ -35,13 +35,18 @@ jobs:
       - name: Init project
         run: |
           npm init -y
-          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/local-notifications
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/local-notifications @capacitor/assets
           npx cap init "Good Planner" "com.yourname.goodplanner" --web-dir=www
 
       - name: Add Android platform
         run: |
           npx cap add android
           npx cap sync
+
+      - name: Generate app icon & splash screen
+        run: |
+          npx @capacitor/assets generate --android --assetPath app-assets
+          npx cap sync android
 
       - name: Fix Kotlin stdlib duplicate classes
         run: |
