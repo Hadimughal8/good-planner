@@ -628,7 +628,7 @@
       </div>
 
       <div class="settings-card" style="text-align:center; box-shadow:none; background:transparent; border:none;">
-        <div style="font-size:11px; color:var(--text-low); letter-spacing:.5px;">Good Planner · v1.3</div>
+        <div style="font-size:11px; color:var(--text-low); letter-spacing:.5px;">Good Planner · v1.4</div>
       </div>
     </section>
   </main>
@@ -685,6 +685,19 @@
       <span class="form-label">Description <span style="text-transform:none; letter-spacing:0; font-weight:400; color:var(--text-low);">(what is this for)</span></span>
       <textarea class="field-plain" id="itemDesc" placeholder="Add a few details so you remember exactly what this is for..."></textarea>
     </div>
+    <div class="form-row">
+      <span class="form-label">Repeat</span>
+      <div class="type-toggle">
+        <div class="type-opt active" id="repeatOnce" data-repeat="once">
+          <svg viewBox="0 0 24 24" fill="none"><rect x="4" y="5" width="16" height="15" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M4 9h16" stroke="currentColor" stroke-width="1.6"/></svg>
+          This date only
+        </div>
+        <div class="type-opt" id="repeatDaily" data-repeat="daily">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M4 12a8 8 0 0113.66-5.66M20 12a8 8 0 01-13.66 5.66" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M18 3v4h-4M6 21v-4h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Every day
+        </div>
+      </div>
+    </div>
     <div class="sheet-actions">
       <button class="btn btn-danger" id="deleteItem" style="display:none;">Delete</button>
       <button class="btn btn-ghost" id="cancelAdd">Cancel</button>
@@ -734,11 +747,14 @@
 
   let currentDate = new Date();
   currentDate.setHours(0,0,0,0);
-  let dayCache = {}; // 'YYYY-MM-DD' -> {tasks:[...]}
+  let dayCache = {}; // 'YYYY-MM-DD' -> {tasks:[...], dailyDone:{...}}
+  let dailyCache = null; // array of daily-repeating item templates, shared across all days
   let notesCache = [];
   let editingNoteId = null;
   let editingItemId = null; // when set, add sheet is in edit mode
+  let editingIsDaily = false; // whether the item being edited lives in the daily template list
   let pendingType = 'task';
+  let pendingRepeat = 'once';
 
   function fmtKey(d){
     return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
@@ -746,30 +762,24 @@
   function isSameDay(a,b){ return fmtKey(a)===fmtKey(b); }
   function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
-  // ---------- Native alarm engine (Capacitor / Android) ----------
-  // When this app is running inside the Capacitor-wrapped Android app (built via
-  // the GitHub Action), window.Capacitor.isNativePlatform() is true and the
-  // LocalNotifications plugin is available. Notifications scheduled through it
-  // are handed off to Android's own AlarmManager, so they fire at the exact
-  // time even if this app is fully closed or the screen is locked — because
-  // Android itself wakes the app briefly to deliver them, independent of any
-  // JavaScript timer running in a page. When just viewed in a regular mobile
-  // browser (not the built APK), Native stays null and the app falls back to
-  // the in-page reminder engine further below (only works while the tab/app
-  // is open).
-  const Native = (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() && window.Capacitor.Plugins && window.Capacitor.Plugins.AlarmScheduler)
-    ? window.Capacitor.Plugins.AlarmScheduler
-    : null;
-  // Used only to trigger the standard Android notification permission prompt (Android 13+);
-  // the actual ringing is handled entirely by the AlarmScheduler plugin above.
-  const NotifPerm = (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications)
+  // ---------- Native alarm engine (Capacitor Local Notifications) ----------
+  // Uses the REAL, published @capacitor/local-notifications plugin (installed
+  // via the GitHub Actions workflow). On a real Android/iOS build this hands
+  // reminders off to the OS's own alarm/notification system — they fire at
+  // the exact time even if the app is fully closed or the screen is locked,
+  // with the phone's own notification sound + vibration, and the OS prompts
+  // for permission the standard way (Android 13+ POST_NOTIFICATIONS / iOS
+  // notification permission dialog). When just viewed in a regular mobile
+  // browser (not the built APK), LN stays null and the app falls back to
+  // the in-page reminder engine further below (only works while open).
+  const LN = (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications)
     ? window.Capacitor.Plugins.LocalNotifications
     : null;
 
   function hashId(str){
     let h = 0;
     for(let i=0;i<str.length;i++){ h = (h*31 + str.charCodeAt(i)) | 0; }
-    return Math.abs(h) % 2147483647;
+    return Math.abs(h) % 2147483000 + 1;
   }
 
   function buildDateTime(dateObj, timeStr){
@@ -779,31 +789,57 @@
     return d;
   }
 
+  let notifChannelReady = false;
   async function ensureNotifChannel(){
-    if(NotifPerm){ try{ await NotifPerm.requestPermissions(); }catch(e){} }
+    if(!LN) return false;
+    try{
+      const perm = await LN.checkPermissions();
+      let granted = perm.display === 'granted';
+      if(!granted){
+        const req = await LN.requestPermissions();
+        granted = req.display === 'granted';
+      }
+      if(granted && !notifChannelReady && LN.createChannel){
+        try{
+          await LN.createChannel({
+            id: 'reminders', name: 'Reminders', description: 'Good Planner reminder alarms',
+            importance: 5, visibility: 1, vibration: true
+          });
+          notifChannelReady = true;
+        }catch(e){}
+      }
+      return granted;
+    }catch(e){ return false; }
   }
 
   async function scheduleNativeReminder(item, dateObj){
-    if(!Native || item.type!=='reminder' || !item.time) return;
-    if(dateObj.getTime() <= Date.now()) return; // don't schedule for the past
+    if(!LN || item.type!=='reminder' || !item.time) return;
+    const granted = await ensureNotifChannel();
+    if(!granted){ showToast('Enable notification permission to get reminder alarms'); return; }
+    const notifId = hashId(item.id);
+    const schedule = item.repeat==='daily'
+      ? { on: { hour: dateObj.getHours(), minute: dateObj.getMinutes() }, allowWhileIdle: true }
+      : (dateObj.getTime() <= Date.now() ? null : { at: dateObj, allowWhileIdle: true });
+    if(!schedule) return; // don't schedule a one-off reminder for a time already past
     try{
-      await Native.schedule({
-        id: hashId(item.id),
-        atMillis: dateObj.getTime(),
-        title: item.title || 'Reminder',
-        body: item.desc || 'Your reminder time has arrived'
-      });
+      await LN.schedule({ notifications: [{
+        id: notifId, title: item.title || 'Reminder', body: item.desc || 'Your reminder time has arrived',
+        channelId: 'reminders', schedule
+      }]});
     }catch(e){ console.error('native schedule failed', e); }
   }
 
   async function cancelNativeReminder(itemId){
-    if(!Native) return;
-    try{ await Native.cancel({ id: hashId(itemId) }); }catch(e){}
+    if(!LN) return;
+    try{ await LN.cancel({ notifications: [{ id: hashId(itemId) }] }); }catch(e){}
   }
 
   // Cancels the alarm for every reminder currently stored (used before wiping all data).
   async function cancelAllNativeReminders(){
-    if(!Native) return;
+    if(!LN) return;
+    for(const item of loadDailyItems()){
+      if(item.type==='reminder') await cancelNativeReminder(item.id);
+    }
     const keys = storListPrefix('day:');
     for(const k of keys){
       const day = storGet(k);
@@ -814,11 +850,16 @@
     }
   }
 
-  // On startup, re-schedule any not-yet-fired future reminders. This matters
-  // after the app is reinstalled/updated, or the very first run, since past
-  // AlarmManager schedules don't survive an app data wipe.
+  // On startup, re-schedule any not-yet-fired future reminders (today or later),
+  // plus every daily-repeating reminder template. This matters after
+  // reinstall/update, since past AlarmManager schedules don't survive that.
   async function resyncNativeReminders(){
-    if(!Native) return;
+    if(!LN) return;
+    for(const item of loadDailyItems()){
+      if(item.type==='reminder' && item.time){
+        await scheduleNativeReminder(item, buildDateTime(new Date(), item.time));
+      }
+    }
     const keys = storListPrefix('day:');
     const todayStr = fmtKey(new Date());
     for(const k of keys){
@@ -828,8 +869,7 @@
       if(!day || !day.tasks) continue;
       day.tasks.forEach(item=>{
         if(item.type==='reminder' && item.time && !item.done){
-          const d = buildDateTime(new Date(dateStr+'T00:00:00'), item.time);
-          scheduleNativeReminder(item, d);
+          scheduleNativeReminder(item, buildDateTime(new Date(dateStr+'T00:00:00'), item.time));
         }
       });
     }
@@ -865,11 +905,23 @@
   function loadDay(dateKey){
     if(dayCache[dateKey]) return dayCache[dateKey];
     const data = storGet('day:'+dateKey);
-    dayCache[dateKey] = data || {tasks:[]};
+    dayCache[dateKey] = data || {tasks:[], dailyDone:{}};
+    if(!dayCache[dateKey].dailyDone) dayCache[dateKey].dailyDone = {};
     return dayCache[dateKey];
   }
   function saveDay(dateKey){
     storSet('day:'+dateKey, dayCache[dateKey]);
+  }
+
+  // Daily-repeating item templates — one shared list, shown on every day's agenda.
+  function loadDailyItems(){
+    if(dailyCache) return dailyCache;
+    dailyCache = storGet('daily') || [];
+    return dailyCache;
+  }
+  function saveDailyItems(items){
+    dailyCache = items;
+    storSet('daily', items);
   }
 
   function loadNotes(){
@@ -910,7 +962,13 @@
     updateDateHeader();
     const key = fmtKey(currentDate);
     const day = loadDay(key);
-    const items = [...day.tasks].sort((a,b)=>timeToMinutes(a.time)-timeToMinutes(b.time));
+    const dailyItems = loadDailyItems().map(d => ({
+      ...d,
+      done: !!day.dailyDone[d.id],
+      _isDaily: true
+    }));
+    const onceItems = day.tasks.map(t => ({ ...t, _isDaily:false }));
+    const items = [...onceItems, ...dailyItems].sort((a,b)=>timeToMinutes(a.time)-timeToMinutes(b.time));
     const list = $('#agendaList');
     list.innerHTML='';
 
@@ -939,19 +997,20 @@
     }
 
     items.forEach(item=>{
+      const dailyAttr = item._isDaily ? '1' : '0';
       const el = document.createElement('div');
       el.className = 'agenda-item'+(item.done?' done':'')+(item.type==='reminder'?' reminder':'');
       el.innerHTML = `
         <div class="time-col"><div class="time-text">${fmtTime(item.time)}</div></div>
         <div class="node"></div>
-        <div class="item-card" data-id="${item.id}">
-          ${item.type==='task' ? `<div class="check ${item.done?'checked':''}" data-id="${item.id}"><svg viewBox="0 0 24 24" fill="none"><path d="M4 12l5 5 11-11" stroke="#f8efe2" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>` : ''}
+        <div class="item-card" data-id="${item.id}" data-daily="${dailyAttr}">
+          ${item.type==='task' ? `<div class="check ${item.done?'checked':''}" data-id="${item.id}" data-daily="${dailyAttr}"><svg viewBox="0 0 24 24" fill="none"><path d="M4 12l5 5 11-11" stroke="#f8efe2" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>` : ''}
           <div class="item-body">
             <div class="item-title wrap-text">${escapeHtml(item.title)}</div>
             ${item.desc ? `<div class="item-desc wrap-text">${escapeHtml(item.desc)}</div>` : ''}
-            ${item.type==='reminder' ? `<div class="item-tag"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3a5 5 0 00-5 5v3.5c0 .7-.28 1.4-.78 1.9L5 15h14l-1.22-1.6a2.7 2.7 0 01-.78-1.9V8a5 5 0 00-5-5z" stroke="currentColor" stroke-width="1.6"/></svg>Reminder</div>` : ''}
+            ${item.type==='reminder' ? `<div class="item-tag"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3a5 5 0 00-5 5v3.5c0 .7-.28 1.4-.78 1.9L5 15h14l-1.22-1.6a2.7 2.7 0 01-.78-1.9V8a5 5 0 00-5-5z" stroke="currentColor" stroke-width="1.6"/></svg>${item.repeat==='daily'?'Reminder · Every day':'Reminder'}</div>` : (item.repeat==='daily' ? `<div class="item-tag"><svg viewBox="0 0 24 24" fill="none"><path d="M4 12a8 8 0 0113.66-5.66M20 12a8 8 0 01-13.66 5.66" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Every day</div>` : '')}
           </div>
-          <div class="del-btn" data-id="${item.id}"><svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+          <div class="del-btn" data-id="${item.id}" data-daily="${dailyAttr}"><svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></div>
         </div>`;
       list.appendChild(el);
     });
@@ -959,25 +1018,47 @@
     $$('.check').forEach(c=>c.addEventListener('click', (e)=>{
       e.stopPropagation();
       const id = e.currentTarget.getAttribute('data-id');
-      const day = loadDay(fmtKey(currentDate));
-      const t = day.tasks.find(x=>x.id===id);
-      if(t){ t.done = !t.done; saveDay(fmtKey(currentDate)); renderToday(); }
+      const isDaily = e.currentTarget.getAttribute('data-daily')==='1';
+      const dayKey = fmtKey(currentDate);
+      if(isDaily){
+        const d = loadDay(dayKey);
+        d.dailyDone[id] = !d.dailyDone[id];
+        saveDay(dayKey);
+      } else {
+        const d = loadDay(dayKey);
+        const t = d.tasks.find(x=>x.id===id);
+        if(t) t.done = !t.done;
+        saveDay(dayKey);
+      }
+      renderToday();
     }));
     $$('.del-btn').forEach(c=>c.addEventListener('click', async (e)=>{
       e.stopPropagation();
       const id = e.currentTarget.getAttribute('data-id');
-      const day = loadDay(fmtKey(currentDate));
-      day.tasks = day.tasks.filter(x=>x.id!==id);
-      saveDay(fmtKey(currentDate));
+      const isDaily = e.currentTarget.getAttribute('data-daily')==='1';
+      if(isDaily){
+        saveDailyItems(loadDailyItems().filter(x=>x.id!==id));
+      } else {
+        const dayKey = fmtKey(currentDate);
+        const d = loadDay(dayKey);
+        d.tasks = d.tasks.filter(x=>x.id!==id);
+        saveDay(dayKey);
+      }
       await cancelNativeReminder(id);
       renderToday();
       showToast('Removed');
     }));
     $$('.item-card').forEach(c=>c.addEventListener('click', (e)=>{
       const id = e.currentTarget.getAttribute('data-id');
-      const day = loadDay(fmtKey(currentDate));
-      const item = day.tasks.find(x=>x.id===id);
-      if(item) openItemEditor(item);
+      const isDaily = e.currentTarget.getAttribute('data-daily')==='1';
+      if(isDaily){
+        const item = loadDailyItems().find(x=>x.id===id);
+        if(item) openItemEditor(item, true);
+      } else {
+        const d = loadDay(fmtKey(currentDate));
+        const item = d.tasks.find(x=>x.id===id);
+        if(item) openItemEditor(item, false);
+      }
     }));
   }
 
@@ -1050,20 +1131,29 @@
     $('#typeTask').classList.toggle('active', t==='task');
     $('#typeReminder').classList.toggle('active', t==='reminder');
   }
+  $('#repeatOnce').addEventListener('click', ()=>setRepeat('once'));
+  $('#repeatDaily').addEventListener('click', ()=>setRepeat('daily'));
+  function setRepeat(r){
+    pendingRepeat = r;
+    $('#repeatOnce').classList.toggle('active', r==='once');
+    $('#repeatDaily').classList.toggle('active', r==='daily');
+  }
   $('#fabAdd').addEventListener('click', ()=>{
     const activeView = $('.nav-btn.active').getAttribute('data-view');
     if(activeView==='notes'){ openNoteEditor(null); return; }
     if(activeView==='settings'){ switchView('today'); }
-    openItemEditor(null);
+    openItemEditor(null, false);
   });
 
-  function openItemEditor(item){
+  function openItemEditor(item, isDaily){
     editingItemId = item ? item.id : null;
+    editingIsDaily = !!isDaily;
     $('#itemSheetTitle').textContent = item ? 'Edit item' : 'Add to your day';
     $('#itemTitle').value = item ? item.title : '';
     $('#itemTime').value = item ? (item.time||'') : '';
     $('#itemDesc').value = item ? (item.desc||'') : '';
     setType(item ? item.type : 'task');
+    setRepeat(item && item.repeat==='daily' ? 'daily' : 'once');
     $('#deleteItem').style.display = item ? 'block' : 'none';
     $('#confirmAdd').textContent = item ? 'Save' : 'Add';
     openOverlay('#addOverlay');
@@ -1075,37 +1165,65 @@
     if(!title){ $('#itemTitle').focus(); return; }
     const time = $('#itemTime').value;
     const desc = $('#itemDesc').value.trim();
-    const key = fmtKey(currentDate);
-    const day = loadDay(key);
+    const dayKey = fmtKey(currentDate);
+
     if(editingItemId){
-      const t = day.tasks.find(x=>x.id===editingItemId);
-      if(t){ if(t.time!==time) t.alerted=false; t.title=title; t.time=time; t.desc=desc; t.type=pendingType; }
-      saveDay(key);
+      // Remove from wherever it currently lives — its repeat setting may have changed.
+      if(editingIsDaily){
+        saveDailyItems(loadDailyItems().filter(x=>x.id!==editingItemId));
+      } else {
+        const d = loadDay(dayKey);
+        d.tasks = d.tasks.filter(x=>x.id!==editingItemId);
+        saveDay(dayKey);
+      }
       await cancelNativeReminder(editingItemId);
-      if(t && pendingType==='reminder' && time){
-        await scheduleNativeReminder(t, buildDateTime(currentDate, time));
+
+      const updated = {id:editingItemId, title, time, desc, type:pendingType, repeat:pendingRepeat, done:false};
+      if(pendingRepeat==='daily'){
+        const items = loadDailyItems();
+        items.push(updated);
+        saveDailyItems(items);
+      } else {
+        const d = loadDay(dayKey);
+        d.tasks.push(updated);
+        saveDay(dayKey);
+      }
+      if(pendingType==='reminder' && time){
+        await scheduleNativeReminder(updated, pendingRepeat==='daily' ? buildDateTime(new Date(), time) : buildDateTime(currentDate, time));
       }
       closeOverlay('#addOverlay');
       renderToday();
       showToast('Saved');
     } else {
-      const newItem = {id:uid(), title, time, desc, type:pendingType, done:false, alerted:false};
-      day.tasks.push(newItem);
-      saveDay(key);
+      const newItem = {id:uid(), title, time, desc, type:pendingType, repeat:pendingRepeat, done:false, alerted:false};
+      if(pendingRepeat==='daily'){
+        const items = loadDailyItems();
+        items.push(newItem);
+        saveDailyItems(items);
+      } else {
+        const d = loadDay(dayKey);
+        d.tasks.push(newItem);
+        saveDay(dayKey);
+      }
       if(pendingType==='reminder' && time){
-        await scheduleNativeReminder(newItem, buildDateTime(currentDate, time));
+        await scheduleNativeReminder(newItem, pendingRepeat==='daily' ? buildDateTime(new Date(), time) : buildDateTime(currentDate, time));
       }
       closeOverlay('#addOverlay');
       renderToday();
-      showToast(pendingType==='reminder' ? 'Reminder added' : 'Task added');
+      const label = pendingRepeat==='daily' ? ' (every day)' : '';
+      showToast((pendingType==='reminder' ? 'Reminder added' : 'Task added') + label);
     }
   });
   $('#deleteItem').addEventListener('click', async ()=>{
     if(!editingItemId) return;
-    const key = fmtKey(currentDate);
-    const day = loadDay(key);
-    day.tasks = day.tasks.filter(x=>x.id!==editingItemId);
-    saveDay(key);
+    if(editingIsDaily){
+      saveDailyItems(loadDailyItems().filter(x=>x.id!==editingItemId));
+    } else {
+      const dayKey = fmtKey(currentDate);
+      const d = loadDay(dayKey);
+      d.tasks = d.tasks.filter(x=>x.id!==editingItemId);
+      saveDay(dayKey);
+    }
     await cancelNativeReminder(editingItemId);
     closeOverlay('#addOverlay');
     renderToday();
@@ -1184,17 +1302,9 @@
     showToast('Email saved');
   });
   $('#enableNotif').addEventListener('click', async ()=>{
-    if(Native){
-      await ensureNotifChannel();
-      try{
-        const check = await Native.canScheduleExact();
-        if(check && check.value === false){
-          showToast('Opening alarm permission settings...');
-          await Native.openExactAlarmSettings();
-          return;
-        }
-      }catch(e){}
-      showToast('Notifications enabled for reminders');
+    if(LN){
+      const granted = await ensureNotifChannel();
+      showToast(granted ? 'Notifications enabled' : 'Permission not granted');
       return;
     }
     if(!('Notification' in window)){ showToast('Not supported on this browser'); return; }
@@ -1202,12 +1312,19 @@
     showToast(perm==='granted' ? 'Notifications enabled' : 'Permission not granted');
   });
   $('#testAlarm').addEventListener('click', async ()=>{
-    if(Native){
-      await ensureNotifChannel();
-      await scheduleNativeReminder({id:'test-alarm', type:'reminder', time:'00:00', title:'Test alarm', desc:'This is what your reminder sounds like'}, new Date(Date.now()+5000));
-      showToast('Test alarm in 5 seconds — try locking your phone');
+    unlockAudio();
+    if(LN){
+      const granted = await ensureNotifChannel();
+      if(!granted){ showToast('Permission not granted'); return; }
+      try{
+        await LN.schedule({ notifications: [{
+          id: 999999, title: 'Test alarm', body: 'This is what your reminders will sound like',
+          channelId: 'reminders', schedule: { at: new Date(Date.now()+5000) }
+        }]});
+        showToast('Test alarm in 5 seconds — try locking your phone');
+      }catch(e){ showToast('Could not schedule test alarm'); }
     } else {
-      fireReminderAlert({title:'Test alarm', desc:'This is what your reminder sounds like'});
+      fireReminderAlert({title:'Test alarm', desc:'This is what your reminders will sound like'});
     }
   });
   $('#clearData').addEventListener('click', ()=>openOverlay('#confirmOverlay'));
@@ -1219,7 +1336,8 @@
     storDelete('notes');
     storDelete('profile');
     storDelete('theme');
-    dayCache = {}; notesCache = [];
+    storDelete('daily');
+    dayCache = {}; notesCache = []; dailyCache = null;
     $('#emailInput').value='';
     applyTheme(false);
     closeOverlay('#confirmOverlay');
@@ -1227,10 +1345,10 @@
     showToast('All data cleared');
   });
 
-  // ---------- reminder alarm engine ----------
-  // A single persistent AudioContext, unlocked on the user's first tap.
-  // WebViews/browsers silently block audio started without a prior user
-  // gesture, so we "warm up" the context early and just resume it later.
+  // ---------- browser-fallback reminder alarm engine ----------
+  // Only used when NOT running as the native app (LN is null) — e.g. testing
+  // this page directly in a mobile/desktop browser. Only works while the tab
+  // stays open, since no web page can wake a locked phone or closed app.
   let sharedAudioCtx = null;
   function unlockAudio(){
     if(!sharedAudioCtx){
@@ -1241,8 +1359,6 @@
   document.addEventListener('click', unlockAudio, {once:false});
   document.addEventListener('touchstart', unlockAudio, {once:false});
 
-  // Plays a short alarm-style beep sequence using Web Audio API (no external file needed).
-  // Loops a few rounds so it's noticeable even if the phone is on silent-but-media, low volume, etc.
   function playAlarmSound(){
     try{
       if(!sharedAudioCtx){ sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
@@ -1260,7 +1376,6 @@
           osc.start(start); osc.stop(start+0.3);
         };
         const now = ctx.currentTime;
-        // three rounds of a two-tone chime, spaced out, so it reads as an alarm not a notification blip
         for(let round=0; round<3; round++){
           const base = now + round*1.1;
           beepAt(base, 880);
@@ -1287,67 +1402,80 @@
     }
   }
 
-  // Checks today's reminders against the current time and fires any that are due.
-  // Uses a generous catch-up window so that even if the browser tab was backgrounded
-  // and JS timers got throttled by the OS, a reminder that was "due" a little while ago
-  // still fires the moment the check runs again (e.g. when the screen/app is reopened).
   function checkReminders(){
     const now = new Date();
     const todayKey = fmtKey(now);
     const nowMinutes = now.getHours()*60 + now.getMinutes();
+
+    // once-off items for today
     const day = storGet('day:'+todayKey);
-    if(!day || !day.tasks || !day.tasks.length) return;
     let changed = false;
-    day.tasks.forEach(item=>{
-      if(item.type!=='reminder' || !item.time || item.alerted) return;
-      const [h,m] = item.time.split(':').map(Number);
-      const itemMinutes = h*60+m;
-      // Fires once due, and stays "catchable" for 30 minutes in case the tab was
-      // backgrounded/throttled by the OS and this check runs late.
-      if(nowMinutes >= itemMinutes && nowMinutes <= itemMinutes+30){
-        item.alerted = true;
-        changed = true;
-        fireReminderAlert(item);
+    if(day && day.tasks && day.tasks.length){
+      day.tasks.forEach(item=>{
+        if(item.type!=='reminder' || !item.time || item.alerted) return;
+        const [h,m] = item.time.split(':').map(Number);
+        const itemMinutes = h*60+m;
+        if(nowMinutes >= itemMinutes && nowMinutes <= itemMinutes+30){
+          item.alerted = true;
+          changed = true;
+          fireReminderAlert(item);
+        }
+      });
+      if(changed){
+        storSet('day:'+todayKey, day);
+        if(dayCache[todayKey]) dayCache[todayKey] = day;
       }
-    });
-    if(changed){
-      storSet('day:'+todayKey, day);
-      if(dayCache[todayKey]) dayCache[todayKey] = day;
-      if(isSameDay(currentDate, now)) renderToday();
     }
+
+    // daily-repeating items — tracked per-day via a lightweight alerted map
+    const daily = loadDailyItems();
+    if(daily.length){
+      const d = loadDay(todayKey);
+      if(!d.dailyAlerted) d.dailyAlerted = {};
+      let dailyChanged = false;
+      daily.forEach(item=>{
+        if(item.type!=='reminder' || !item.time || d.dailyAlerted[item.id]) return;
+        const [h,m] = item.time.split(':').map(Number);
+        const itemMinutes = h*60+m;
+        if(nowMinutes >= itemMinutes && nowMinutes <= itemMinutes+30){
+          d.dailyAlerted[item.id] = true;
+          dailyChanged = true;
+          fireReminderAlert(item);
+        }
+      });
+      if(dailyChanged){ saveDay(todayKey); }
+    }
+
+    if(isSameDay(currentDate, now)) renderToday();
   }
 
-  // Try to keep the screen awake while the app is open and in the foreground,
-  // so a reminder due while you're using your phone elsewhere still has the
-  // best chance of sounding. This only helps while the app tab is open —
-  // it cannot wake a locked phone or a fully closed app (no web page can).
   let wakeLock = null;
   async function requestWakeLock(){
     try{
       if('wakeLock' in navigator && document.visibilityState==='visible'){
         wakeLock = await navigator.wakeLock.request('screen');
       }
-    }catch(e){ /* not supported / not permitted, ignore silently */ }
+    }catch(e){}
   }
   document.addEventListener('visibilitychange', ()=>{
-    if(document.visibilityState==='visible'){
+    if(document.visibilityState==='visible' && !LN){
       requestWakeLock();
-      checkReminders(); // catch up immediately on returning to the app
+      checkReminders();
     }
   });
 
   // ---------- init ----------
   async function init(){
     loadDay(fmtKey(currentDate));
+    loadDailyItems();
     loadNotes();
     initTheme();
     initSettings();
     renderToday();
     renderNotes();
-    if(Native){
-      // Real app build: Android's AlarmManager delivers reminders even if this
-      // app is closed or the screen is locked, so the in-page JS timer below
-      // isn't needed and is skipped to avoid duplicate alerts.
+    if(LN){
+      // Real app build: Android/iOS delivers reminders even if this app is
+      // closed or the screen is locked, so the in-page JS timer isn't needed.
       await ensureNotifChannel();
       await resyncNativeReminders();
     } else {
